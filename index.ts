@@ -1,7 +1,8 @@
 /**
  * pi-qwen-oauth - Qwen OAuth Provider for pi coding agent
  * 
- * Free tier via qwen.ai OAuth (1,000 req/day)
+ * Uses exact same OAuth flow and API as qwen-code CLI
+ * Free tier: 1,000 requests/day via qwen.ai OAuth
  * 
  * Install: pi install git:github.com/ktappdev/pi-qwen-oauth
  */
@@ -14,15 +15,16 @@ import os from 'node:os';
 import { promises as fs } from 'node:fs';
 
 // ============================================================================
-// Configuration
+// Configuration (exact same as qwen-code)
 // ============================================================================
 
-const QWEN_DEVICE_CODE_URL = 'https://chat.qwen.ai/api/v1/oauth2/device/code';
-const QWEN_TOKEN_URL = 'https://chat.qwen.ai/api/v1/oauth2/token';
-const QWEN_DEFAULT_BASE_URL = 'https://portal.qwen.ai/v1';
-const QWEN_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
-const QWEN_SCOPE = 'openid profile email model.completion';
-const QWEN_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
+const QWEN_OAUTH_BASE = 'https://chat.qwen.ai';
+const DEVICE_CODE_URL = `${QWEN_OAUTH_BASE}/api/v1/oauth2/device/code`;
+const TOKEN_URL = `${QWEN_OAUTH_BASE}/api/v1/oauth2/token`;
+const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
+const SCOPE = 'openid profile email model.completion';
+const GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
 const CREDENTIALS_PATH = path.join(os.homedir(), '.qwen', 'oauth_creds.json');
 const PROVIDER_NAME = 'qwen-oauth';
@@ -49,7 +51,7 @@ interface TokenResponse {
 }
 
 // ============================================================================
-// PKCE Helpers
+// PKCE
 // ============================================================================
 
 function generatePKCE(): { verifier: string; challenge: string } {
@@ -60,7 +62,7 @@ function generatePKCE(): { verifier: string; challenge: string } {
 }
 
 // ============================================================================
-// Token Management
+// Token Storage
 // ============================================================================
 
 async function readCredentials(): Promise<(OAuthCredentials & { enterpriseUrl?: string }) | null> {
@@ -85,17 +87,18 @@ async function startDeviceFlow(): Promise<{ deviceCode: DeviceCodeResponse; veri
   const { verifier, challenge } = generatePKCE();
 
   const body = new URLSearchParams({
-    client_id: QWEN_CLIENT_ID,
-    scope: QWEN_SCOPE,
+    client_id: CLIENT_ID,
+    scope: SCOPE,
     code_challenge: challenge,
     code_challenge_method: 'S256',
   });
 
-  const response = await fetch(QWEN_DEVICE_CODE_URL, {
+  const response = await fetch(DEVICE_CODE_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'application/json',
+      'x-request-id': crypto.randomUUID(),
     },
     body: body.toString(),
   });
@@ -128,13 +131,13 @@ async function pollForToken(
     if (signal?.aborted) throw new Error('Login cancelled');
 
     const body = new URLSearchParams({
-      grant_type: QWEN_GRANT_TYPE,
-      client_id: QWEN_CLIENT_ID,
+      grant_type: GRANT_TYPE,
+      client_id: CLIENT_ID,
       device_code: deviceCode,
       code_verifier: verifier,
     });
 
-    const response = await fetch(QWEN_TOKEN_URL, {
+    const response = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -165,6 +168,12 @@ async function pollForToken(
         intervalMs = Math.min(intervalMs + 5000, 10000);
         await new Promise(r => setTimeout(r, intervalMs));
         continue;
+      }
+      if (error === 'expired_token') {
+        throw new Error('Device code expired. Please restart authentication.');
+      }
+      if (error === 'access_denied') {
+        throw new Error('Authorization denied by user.');
       }
       throw new Error(`Token request failed: ${error || response.status}`);
     }
@@ -201,6 +210,7 @@ async function loginQwen(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentia
     callbacks.signal,
   );
 
+  // Calculate expiry with 5-minute buffer (same as qwen-code)
   const expiresAt = Date.now() + tokenResponse.expires_in * 1000 - 5 * 60 * 1000;
 
   return {
@@ -215,10 +225,10 @@ async function refreshQwenToken(credentials: OAuthCredentials & { enterpriseUrl?
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: credentials.refresh,
-    client_id: QWEN_CLIENT_ID,
+    client_id: CLIENT_ID,
   });
 
-  const response = await fetch(QWEN_TOKEN_URL, {
+  const response = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -249,8 +259,15 @@ async function refreshQwenToken(credentials: OAuthCredentials & { enterpriseUrl?
 }
 
 function getQwenBaseUrl(resourceUrl?: string): string {
-  const url = resourceUrl ? `https://${resourceUrl}/v1` : QWEN_DEFAULT_BASE_URL;
-  return url;
+  // Same logic as qwen-code's getCurrentEndpoint()
+  const baseEndpoint = resourceUrl || DEFAULT_BASE_URL;
+  const suffix = '/v1';
+  const normalizedUrl = baseEndpoint.startsWith('http')
+    ? baseEndpoint
+    : `https://${baseEndpoint}`;
+  return normalizedUrl.endsWith(suffix)
+    ? normalizedUrl
+    : `${normalizedUrl}${suffix}`;
 }
 
 // ============================================================================
@@ -259,34 +276,26 @@ function getQwenBaseUrl(resourceUrl?: string): string {
 
 export default function qwenOAuthExtension(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_NAME, {
-    baseUrl: QWEN_DEFAULT_BASE_URL,
+    baseUrl: DEFAULT_BASE_URL,
     api: 'openai-completions',
     authHeader: true,
     headers: {
-      'User-Agent': 'pi-qwen-oauth',
+      'User-Agent': 'QwenCode/0.14.3 (darwin; arm64)',
+      'X-DashScope-CacheControl': 'enable',
+      'X-DashScope-UserAgent': 'QwenCode/0.14.3 (darwin; arm64)',
+      'X-DashScope-AuthType': 'qwen-oauth',
     },
     
     models: [
       {
-        id: 'qwen3-coder-plus',
-        name: 'Qwen3 Coder Plus',
-        description: 'Qwen3 Coder Plus via qwen.ai OAuth',
+        id: 'coder-model',
+        name: 'coder-model',
+        description: 'Qwen3.6 Plus - Free via qwen.ai OAuth (1,000 req/day)',
         reasoning: false,
-        input: ['text'],
+        input: ['text', 'image'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1000000,
-        maxTokens: 65536,
-        compat: { supportsDeveloperRole: false },
-      },
-      {
-        id: 'qwen3-coder-flash',
-        name: 'Qwen3 Coder Flash',
-        description: 'Qwen3 Coder Flash via qwen.ai OAuth',
-        reasoning: false,
-        input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1000000,
-        maxTokens: 65536,
+        contextWindow: 256000,
+        maxTokens: 8192,
         compat: { supportsDeveloperRole: false },
       },
     ],
@@ -313,5 +322,5 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
     },
   });
 
-  console.log('[pi-qwen-oauth] Loaded - use /login qwen-oauth');
+  console.log('[pi-qwen-oauth] Loaded - use /login qwen-oauth, /model qwen-oauth/coder-model');
 }
