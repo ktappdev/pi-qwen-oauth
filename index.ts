@@ -254,13 +254,8 @@ async function refreshQwenToken(credentials: OAuthCredentials & { enterpriseUrl?
 // ============================================================================
 
 function getQwenBaseUrl(resourceUrl?: string): string {
-  if (!resourceUrl) {
-    return QWEN_DEFAULT_BASE_URL;
-  }
-  let url = resourceUrl.startsWith('http') ? resourceUrl : `https://${resourceUrl}`;
-  if (!url.endsWith('/v1')) {
-    url = `${url}/v1`;
-  }
+  // OAuth tokens only work with portal.qwen.ai
+  const url = resourceUrl ? `https://${resourceUrl}/v1` : QWEN_DEFAULT_BASE_URL;
   return url;
 }
 
