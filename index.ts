@@ -269,6 +269,9 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
     baseUrl: QWEN_DEFAULT_BASE_URL,
     api: 'openai-completions',
     authHeader: true,
+    headers: {
+      'X-DashScope-CacheControl': 'enable',
+    },
     
     models: [{
       id: MODEL_ID,
