@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Qwen OAuth provider for pi coding agent - free coder-model via qwen.ai",
   "type": "module",
+  "dependencies": {
+    "open": "^10.1.0"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
