@@ -4,16 +4,17 @@
  * Provides free access to coder-model via qwen.ai OAuth
  * 1,000 requests per day free tier
  * 
- * Usage:
- *   /login qwen-oauth   - Start OAuth login flow
- *   /logout qwen-oauth - Clear stored credentials
+ * Setup:
+ *   1. pi install git:github.com/ktappdev/pi-qwen-oauth
+ *   2. Manually create ~/.qwen/oauth_creds.json with your tokens
+ *      OR use /login qwen-oauth after adding to your shell
+ *   3. /model qwen-oauth/coder-model
  */
 
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { promises as fs } from 'node:fs';
-import open from 'open';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 
 // ============================================================================
@@ -43,14 +44,6 @@ interface QwenCredentials {
   resource_url?: string;
 }
 
-interface DeviceAuthResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete: string;
-  expires_in: number;
-}
-
 interface TokenResponse {
   access_token: string | null;
   refresh_token?: string | null;
@@ -62,20 +55,9 @@ interface TokenResponse {
   error_description?: string;
 }
 
-interface TokenPendingResponse {
-  status: 'pending';
-  slowDown?: boolean;
-}
-
 // ============================================================================
-// Utilities
+// Token Management
 // ============================================================================
-
-function toUrlEncoded(data: Record<string, string>): string {
-  return Object.entries(data)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join('&');
-}
 
 async function readCredentials(): Promise<QwenCredentials | null> {
   try {
@@ -99,146 +81,6 @@ async function clearCredentials(): Promise<void> {
   }
 }
 
-function isTokenPending(resp: TokenResponse | TokenPendingResponse): resp is TokenPendingResponse {
-  return 'status' in resp && resp.status === 'pending';
-}
-
-function ui(pi: ExtensionAPI) {
-  return (pi as any).ui;
-}
-
-// ============================================================================
-// OAuth Flow
-// ============================================================================
-
-async function startOAuthFlow(pi: ExtensionAPI): Promise<boolean> {
-  const ui_api = ui(pi);
-  
-  // Generate PKCE
-  const codeVerifier = crypto.randomBytes(32).toString('base64url');
-  const codeChallenge = crypto.createHash('sha256')
-    .update(codeVerifier)
-    .digest('base64url');
-
-  try {
-    // Step 1: Get device code
-    const deviceResp = await fetch(DEVICE_CODE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-      body: toUrlEncoded({
-        client_id: CLIENT_ID,
-        scope: SCOPE,
-        code_challenge: codeChallenge,
-        code_challenge_method: 'S256',
-      }),
-    });
-
-    if (!deviceResp.ok) {
-      const err = await deviceResp.text();
-      throw new Error(`Device auth failed: ${err}`);
-    }
-
-    const deviceData = (await deviceResp.json()) as DeviceAuthResponse;
-    
-    const loginUrl = deviceData.verification_uri_complete;
-    
-    // Show login URL to user
-    if (ui_api?.notify) {
-      await ui_api.notify({
-        title: 'Qwen OAuth Login',
-        message: `Open this URL to authorize:\n${loginUrl}`,
-        urgency: 'normal',
-      });
-    }
-    
-    pi.appendEntry({
-      role: 'assistant',
-      content: `🔐 **Qwen OAuth Login**
-
-Please open this URL in your browser to authorize:
-
-\`\`\`
-${loginUrl}
-\`\`\`
-
-Waiting for authorization...`,
-    });
-
-    // Open browser
-    try {
-      await open(loginUrl);
-    } catch {
-      // Browser open may fail in some environments
-    }
-
-    // Step 2: Poll for token
-    let pollInterval = 2000;
-    const maxAttempts = Math.ceil(deviceData.expires_in / (pollInterval / 1000));
-
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise(r => setTimeout(r, pollInterval));
-
-      const tokenResp = await fetch(TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: toUrlEncoded({
-          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          client_id: CLIENT_ID,
-          device_code: deviceData.device_code,
-          code_verifier: codeVerifier,
-        }),
-      });
-
-      const tokenData = (await tokenResp.json()) as TokenResponse | TokenPendingResponse;
-
-      if (isTokenPending(tokenData)) {
-        if (tokenData.slowDown) {
-          pollInterval = Math.min(pollInterval * 1.5, 10000);
-        }
-        pi.appendEntry({
-          role: 'assistant',
-          content: `⏳ Waiting... (${i + 1}/${maxAttempts})`,
-        });
-        continue;
-      }
-
-      if (tokenData.error) {
-        throw new Error(`${tokenData.error}: ${tokenData.error_description}`);
-      }
-
-      // Success! Save credentials
-      const credentials: QwenCredentials = {
-        access_token: tokenData.access_token!,
-        refresh_token: tokenData.refresh_token || undefined,
-        token_type: tokenData.token_type,
-        resource_url: tokenData.resource_url,
-        expiry_date: tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 : undefined,
-      };
-
-      await writeCredentials(credentials);
-
-      pi.appendEntry({
-        role: 'assistant',
-        content: `✅ **Qwen OAuth authenticated successfully!**
-
-You now have access to \`coder-model\` (1,000 requests/day free).
-
-Use \`/model qwen-oauth/coder-model\` to select it.`,
-      });
-
-      return true;
-    }
-
-    throw new Error('Authorization timed out');
-  } catch (error) {
-    pi.appendEntry({
-      role: 'assistant',
-      content: `❌ **OAuth failed:** ${error instanceof Error ? error.message : String(error)}`,
-    });
-    return false;
-  }
-}
-
 async function refreshToken(): Promise<QwenCredentials | null> {
   const creds = await readCredentials();
   if (!creds?.refresh_token) return null;
@@ -246,12 +88,15 @@ async function refreshToken(): Promise<QwenCredentials | null> {
   try {
     const resp = await fetch(TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-      body: toUrlEncoded({
+      headers: { 
+        'Content-Type': 'application/x-www-form-urlencoded', 
+        'Accept': 'application/json' 
+      },
+      body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: creds.refresh_token,
         client_id: CLIENT_ID,
-      }),
+      }).toString(),
     });
 
     if (!resp.ok) {
@@ -295,6 +140,104 @@ async function getValidToken(): Promise<string | null> {
 }
 
 // ============================================================================
+// OAuth Login (for manual use)
+// ============================================================================
+
+export async function qwenOAuthLogin(): Promise<boolean> {
+  // Generate PKCE
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto.createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64url');
+
+  try {
+    // Step 1: Get device code
+    const deviceResp = await fetch(DEVICE_CODE_URL, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/x-www-form-urlencoded', 
+        'Accept': 'application/json' 
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        scope: SCOPE,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+      }).toString(),
+    });
+
+    if (!deviceResp.ok) {
+      const err = await deviceResp.text();
+      throw new Error(`Device auth failed: ${err}`);
+    }
+
+    const deviceData = await deviceResp.json();
+    
+    console.log('\n🔐 Qwen OAuth Login\n');
+    console.log('Open this URL in your browser:\n');
+    console.log(`  ${deviceData.verification_uri_complete}\n`);
+    console.log('Waiting for authorization...\n');
+
+    // Step 2: Poll for token
+    let pollInterval = 2000;
+    const maxAttempts = Math.ceil(deviceData.expires_in / (pollInterval / 1000));
+
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, pollInterval));
+
+      const tokenResp = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/x-www-form-urlencoded', 
+          'Accept': 'application/json' 
+        },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          client_id: CLIENT_ID,
+          device_code: deviceData.device_code,
+          code_verifier: codeVerifier,
+        }).toString(),
+      });
+
+      const tokenData = await tokenResp.json();
+
+      if (tokenData.status === 'pending') {
+        if (tokenData.slowDown) {
+          pollInterval = Math.min(pollInterval * 1.5, 10000);
+        }
+        continue;
+      }
+
+      if (tokenData.error) {
+        throw new Error(`${tokenData.error}: ${tokenData.error_description}`);
+      }
+
+      // Success! Save credentials
+      const credentials: QwenCredentials = {
+        access_token: tokenData.access_token,
+        refresh_token: tokenData.refresh_token || undefined,
+        token_type: tokenData.token_type,
+        resource_url: tokenData.resource_url,
+        expiry_date: tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 : undefined,
+      };
+
+      await writeCredentials(credentials);
+
+      console.log('✅ Qwen OAuth authenticated!\n');
+      console.log('Model: coder-model (1,000 requests/day free)\n');
+      console.log('Use: /model qwen-oauth/coder-model\n');
+      
+      return true;
+    }
+
+    throw new Error('Authorization timed out');
+  } catch (error) {
+    console.error('❌ OAuth failed:', error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
+// ============================================================================
 // Extension
 // ============================================================================
 
@@ -314,11 +257,14 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
       }];
     },
 
-    async complete(
-      args: { messages: any[]; model?: string; maxTokens?: number; temperature?: number },
-    ): Promise<AsyncIterable<any>> {
+    async complete(args: { 
+      messages: any[]; 
+      model?: string; 
+      maxTokens?: number; 
+      temperature?: number 
+    }): Promise<AsyncIterable<any>> {
       const token = await getValidToken();
-      if (!token) throw new Error('Not authenticated. Use /login qwen-oauth');
+      if (!token) throw new Error('Not authenticated with Qwen OAuth');
       if (args.model && !args.model.includes(MODEL_ID)) {
         throw new Error(`Unknown model: ${args.model}`);
       }
@@ -330,7 +276,7 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'pi-qwen-oauth-provider/1.0',
+          'User-Agent': 'pi-qwen-oauth/1.0',
         },
         body: JSON.stringify({
           model: MODEL_ID,
@@ -348,19 +294,14 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
 
       if (!response.body) throw new Error('No response body');
 
-      // Yield chunks
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
+      // Return async iterable for streaming
       return {
         async next() {
-          const { done, value } = await reader.read();
+          const { done, value } = await response.body!.read();
           if (done) return { done: true };
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
+          const text = new TextDecoder().decode(value);
+          const lines = text.split('\n');
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -371,10 +312,7 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
                 if (parsed.choices?.[0]?.delta?.content) {
                   return {
                     done: false,
-                    value: {
-                      type: 'chunk',
-                      content: parsed.choices[0].delta.content,
-                    },
+                    value: { type: 'chunk', content: parsed.choices[0].delta.content },
                   };
                 }
               } catch {}
@@ -387,59 +325,5 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // Register /login command
-  pi.registerCommand({
-    name: 'login',
-    handler: async (args: string[]) => {
-      if (args[0]?.toLowerCase() === PROVIDER_NAME) {
-        await startOAuthFlow(pi);
-        return true;
-      }
-      return false;
-    },
-  });
-
-  // Register /logout command
-  pi.registerCommand({
-    name: 'logout',
-    handler: async (args: string[]) => {
-      if (args[0]?.toLowerCase() === PROVIDER_NAME) {
-        await clearCredentials();
-        pi.appendEntry({
-          role: 'assistant',
-          content: `👋 **Logged out from Qwen OAuth**\n\nCredentials cleared. Use \`/login qwen-oauth\` to log in again.`,
-        });
-        return true;
-      }
-      return false;
-    },
-  });
-
-  // Register /status command to check auth status
-  pi.registerCommand({
-    name: 'status',
-    handler: async (args: string[]) => {
-      if (args[0]?.toLowerCase() === PROVIDER_NAME) {
-        const creds = await readCredentials();
-        if (!creds?.access_token) {
-          pi.appendEntry({
-            role: 'assistant',
-            content: `📋 **Qwen OAuth Status:** Not logged in\n\nUse \`/login qwen-oauth\` to authenticate.`,
-          });
-        } else {
-          const expiresIn = creds.expiry_date 
-            ? Math.max(0, Math.round((creds.expiry_date - Date.now()) / 1000 / 60))
-            : 'unknown';
-          pi.appendEntry({
-            role: 'assistant',
-            content: `✅ **Qwen OAuth Status:** Logged in\n\nModel: \`coder-model\`\nToken expires in: ~${expiresIn} minutes`,
-          });
-        }
-        return true;
-      }
-      return false;
-    },
-  });
-
-  console.log('[pi-qwen-oauth] Loaded - use /login qwen-oauth to authenticate');
+  console.log('[pi-qwen-oauth] Loaded - use /model qwen-oauth/coder-model');
 }
