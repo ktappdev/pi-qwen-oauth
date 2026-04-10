@@ -1,7 +1,7 @@
 /**
  * pi-qwen-oauth - Qwen OAuth Provider for pi coding agent
  * 
- * Free coder-model via qwen.ai OAuth (1,000 req/day)
+ * Free tier via qwen.ai OAuth (1,000 req/day)
  * 
  * Install: pi install git:github.com/ktappdev/pi-qwen-oauth
  */
@@ -19,14 +19,13 @@ import { promises as fs } from 'node:fs';
 
 const QWEN_DEVICE_CODE_URL = 'https://chat.qwen.ai/api/v1/oauth2/device/code';
 const QWEN_TOKEN_URL = 'https://chat.qwen.ai/api/v1/oauth2/token';
-const QWEN_DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const QWEN_DEFAULT_BASE_URL = 'https://portal.qwen.ai/v1';
 const QWEN_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
 const QWEN_SCOPE = 'openid profile email model.completion';
 const QWEN_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
 const CREDENTIALS_PATH = path.join(os.homedir(), '.qwen', 'oauth_creds.json');
 const PROVIDER_NAME = 'qwen-oauth';
-const MODEL_ID = 'coder-model';
 
 // ============================================================================
 // Types
@@ -249,15 +248,14 @@ async function refreshQwenToken(credentials: OAuthCredentials & { enterpriseUrl?
   };
 }
 
-// ============================================================================
-// Extension
-// ============================================================================
-
 function getQwenBaseUrl(resourceUrl?: string): string {
-  // OAuth tokens only work with portal.qwen.ai
   const url = resourceUrl ? `https://${resourceUrl}/v1` : QWEN_DEFAULT_BASE_URL;
   return url;
 }
+
+// ============================================================================
+// Extension
+// ============================================================================
 
 export default function qwenOAuthExtension(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_NAME, {
@@ -265,28 +263,42 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
     api: 'openai-completions',
     authHeader: true,
     headers: {
-      'X-DashScope-CacheControl': 'enable',
+      'User-Agent': 'pi-qwen-oauth',
     },
     
-    models: [{
-      id: MODEL_ID,
-      name: 'coder-model',
-      description: 'Qwen 3.6 Plus - Free via qwen.ai (1,000 req/day)',
-      reasoning: false,
-      input: ['text', 'image'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 256000,
-      maxTokens: 8192,
-    }],
+    models: [
+      {
+        id: 'qwen3-coder-plus',
+        name: 'Qwen3 Coder Plus',
+        description: 'Qwen3 Coder Plus via qwen.ai OAuth',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 65536,
+        compat: { supportsDeveloperRole: false },
+      },
+      {
+        id: 'qwen3-coder-flash',
+        name: 'Qwen3 Coder Flash',
+        description: 'Qwen3 Coder Flash via qwen.ai OAuth',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1000000,
+        maxTokens: 65536,
+        compat: { supportsDeveloperRole: false },
+      },
+    ],
 
     oauth: {
       name: 'Qwen OAuth (Free)',
       
-      async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+      async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials & { enterpriseUrl?: string }> {
         return await loginQwen(callbacks);
       },
 
-      async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+      async refreshToken(credentials: OAuthCredentials & { enterpriseUrl?: string }): Promise<OAuthCredentials & { enterpriseUrl?: string }> {
         return await refreshQwenToken(credentials);
       },
 
