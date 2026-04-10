@@ -19,7 +19,7 @@ import { promises as fs } from 'node:fs';
 
 const QWEN_DEVICE_CODE_URL = 'https://chat.qwen.ai/api/v1/oauth2/device/code';
 const QWEN_TOKEN_URL = 'https://chat.qwen.ai/api/v1/oauth2/token';
-const QWEN_API_URL = 'https://portal.qwen.ai/v1';
+const QWEN_DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const QWEN_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
 const QWEN_SCOPE = 'openid profile email model.completion';
 const QWEN_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
@@ -64,7 +64,7 @@ function generatePKCE(): { verifier: string; challenge: string } {
 // Token Management
 // ============================================================================
 
-async function readCredentials(): Promise<OAuthCredentials & { enterpriseUrl?: string } | null> {
+async function readCredentials(): Promise<(OAuthCredentials & { enterpriseUrl?: string }) | null> {
   try {
     const content = await fs.readFile(CREDENTIALS_PATH, 'utf-8');
     return JSON.parse(content);
@@ -184,7 +184,7 @@ async function pollForToken(
   throw new Error('Authentication timed out');
 }
 
-async function loginQwen(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+async function loginQwen(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials & { enterpriseUrl?: string }> {
   const { deviceCode, verifier } = await startDeviceFlow();
 
   const authUrl = deviceCode.verification_uri_complete || deviceCode.verification_uri;
@@ -202,7 +202,6 @@ async function loginQwen(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentia
     callbacks.signal,
   );
 
-  // Calculate expiry with 5-minute buffer
   const expiresAt = Date.now() + tokenResponse.expires_in * 1000 - 5 * 60 * 1000;
 
   return {
@@ -213,7 +212,7 @@ async function loginQwen(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentia
   };
 }
 
-async function refreshQwenToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+async function refreshQwenToken(credentials: OAuthCredentials & { enterpriseUrl?: string }): Promise<OAuthCredentials & { enterpriseUrl?: string }> {
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: credentials.refresh,
@@ -246,6 +245,7 @@ async function refreshQwenToken(credentials: OAuthCredentials): Promise<OAuthCre
     refresh: data.refresh_token || credentials.refresh,
     access: data.access_token,
     expires: expiresAt,
+    enterpriseUrl: data.resource_url ?? credentials.enterpriseUrl,
   };
 }
 
@@ -253,9 +253,20 @@ async function refreshQwenToken(credentials: OAuthCredentials): Promise<OAuthCre
 // Extension
 // ============================================================================
 
+function getQwenBaseUrl(resourceUrl?: string): string {
+  if (!resourceUrl) {
+    return QWEN_DEFAULT_BASE_URL;
+  }
+  let url = resourceUrl.startsWith('http') ? resourceUrl : `https://${resourceUrl}`;
+  if (!url.endsWith('/v1')) {
+    url = `${url}/v1`;
+  }
+  return url;
+}
+
 export default function qwenOAuthExtension(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER_NAME, {
-    baseUrl: QWEN_API_URL,
+    baseUrl: QWEN_DEFAULT_BASE_URL,
     api: 'openai-completions',
     authHeader: true,
     
@@ -281,8 +292,13 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
         return await refreshQwenToken(credentials);
       },
 
-      getApiKey(credentials: OAuthCredentials): string {
+      getApiKey(credentials: OAuthCredentials & { enterpriseUrl?: string }): string {
         return credentials.access;
+      },
+
+      modifyModels(models, credentials: OAuthCredentials & { enterpriseUrl?: string }) {
+        const baseUrl = getQwenBaseUrl(credentials.enterpriseUrl);
+        return models.map(m => ({ ...m, baseUrl }));
       },
     },
   });
