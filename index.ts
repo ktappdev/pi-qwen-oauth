@@ -217,7 +217,7 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
       
       async login(callbacks) {
         const creds = await doOAuthLogin((url) => {
-          callbacks.onOpenBrowser?.(url);
+          callbacks.onAuth({ url });
         });
         
         if (!creds) throw new Error('OAuth failed');
