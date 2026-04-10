@@ -1,0 +1,11 @@
+{
+  "name": "pi-extension-qwen-oauth",
+  "version": "1.0.0",
+  "description": "Qwen OAuth provider for pi coding agent - free coder-model via qwen.ai",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
