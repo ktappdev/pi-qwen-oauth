@@ -317,7 +317,11 @@ export default function qwenOAuthExtension(pi: ExtensionAPI): void {
 
       modifyModels(models, credentials: OAuthCredentials & { enterpriseUrl?: string }) {
         const baseUrl = getQwenBaseUrl(credentials.enterpriseUrl);
-        return models.map(m => ({ ...m, baseUrl }));
+        return models.map(m =>
+          m.provider === PROVIDER_NAME
+            ? { ...m, baseUrl }
+            : m
+        );
       },
     },
   });
